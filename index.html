@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matching Statement | GATP Solutions</title>
+<style>
+  :root {
+    color-scheme: light;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    color: #152c26;
+    background: #eef3f0;
+    --green: #145b46;
+    --line: #d5e1da;
+    --muted: #4a6259;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  header { background: #163b31; color: white; padding: 20px max(24px, calc((100% - 960px) / 2)); }
+  header span { font-weight: 650; letter-spacing: .04em; }
+  main { max-width: 1008px; margin: 0 auto; padding: 45px 24px 56px; }
+  h1 { font-size: clamp(2rem, 5vw, 3.4rem); line-height: 1.08; letter-spacing: -.045em; margin: 0 0 12px; }
+  h2 { font-size: 1.18rem; margin: 0 0 8px; }
+  p { margin: 0; line-height: 1.5; }
+  main > p { color: var(--muted); margin-bottom: 28px; }
+  .panel { background: white; border: 1px solid var(--line); border-radius: 16px; padding: 24px; }
+  .files { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .file { display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--line); padding: 17px;
+          border-radius: 10px; background: #f8fbf9; }
+  label { font-weight: 650; }
+  .hint { color: var(--muted); font-size: .875rem; }
+  input { font: inherit; font-size: .875rem; width: 100%; color: #243f35; margin-top: 7px; }
+  input::file-selector-button { font: inherit; font-weight: 600; color: var(--green); background: white;
+    border: 1px solid #a9c3b7; border-radius: 6px; padding: 7px 10px; margin-right: 8px; cursor: pointer; }
+  .actions { display: flex; flex-wrap: wrap; gap: 13px 18px; align-items: center; margin-top: 22px; }
+  button, .download { display: inline-block; border: 0; border-radius: 8px; padding: 11px 16px; color: white;
+    background: var(--green); font: inherit; font-weight: 650; line-height: 1.5; text-decoration: none; cursor: pointer; }
+  button:disabled { cursor: wait; opacity: .7; }
+  button:hover:not(:disabled), .download:hover { background: #0d4837; }
+  :focus-visible { outline: 3px solid #268873; outline-offset: 3px; }
+  .feedback { margin-top: 15px; color: var(--muted); }
+  .error { color: #8f252b; font-weight: 550; }
+  #result { margin-top: 18px; }
+  dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+  dl > div { border-top: 1px solid var(--line); padding: 12px 0 0; }
+  dt { color: var(--muted); font-size: .875rem; }
+  dd { font-size: 1.25rem; font-weight: 650; margin: 4px 0 0; }
+  [hidden], .feedback:empty { display: none !important; }
+  @media(max-width: 670px) {
+    main { padding-top: 30px; }
+    .files { grid-template-columns: 1fr; }
+    dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+</style>
+</head>
+<body>
+<header><span>GATP Solutions</span></header>
+<main>
+  <h1>Matching Statement</h1>
+  <p>Reconcile a Chase statement against the Presidio Flats ResMan register.</p>
+  <form id="upload" class="panel">
+    <div class="files">
+      <div class="file">
+        <label for="statement">Chase statement</label>
+        <span class="hint" id="statement-hint">Current period · PDF</span>
+        <input id="statement" name="statement" type="file" accept=".pdf,application/pdf" required aria-describedby="statement-hint">
+      </div>
+      <div class="file">
+        <label for="register">ResMan bank register</label>
+        <span class="hint" id="register-hint">Current period · Excel</span>
+        <input id="register" name="register" type="file" accept=".xlsx" required aria-describedby="register-hint">
+      </div>
+      <div class="file">
+        <label for="prior">Prior ResMan reconciliation</label>
+        <span class="hint" id="prior-hint">Previous finalized period · PDF</span>
+        <input id="prior" name="prior" type="file" accept=".pdf,application/pdf" required aria-describedby="prior-hint">
+      </div>
+      <div class="file">
+        <label for="aging">AP Aging Detail</label>
+        <span class="hint" id="aging-hint">Current period · Excel</span>
+        <input id="aging" name="aging" type="file" accept=".xlsx" required aria-describedby="aging-hint">
+      </div>
+    </div>
+    <div class="actions">
+      <button id="run" type="submit">Run reconciliation</button>
+      <span class="hint">Combined upload limit is 4 MB.</span>
+    </div>
+    <p id="status" class="feedback" role="status"></p>
+    <p id="error" class="feedback error" role="alert"></p>
+  </form>
+  <section id="result" class="panel" hidden aria-labelledby="report-title">
+    <h2 id="report-title" tabindex="-1"></h2>
+    <dl>
+      <div><dt>Chase closing balance</dt><dd id="bank"></dd></div>
+      <div><dt>Adjusted books balance</dt><dd id="adjusted"></dd></div>
+      <div><dt>Adjusted difference</dt><dd id="difference"></dd></div>
+      <div><dt>Open transactions</dt><dd id="exceptions"></dd></div>
+    </dl>
+    <p id="review-note" class="hint"></p>
+    <div class="actions"><a id="download" class="download">Download Excel workbook</a></div>
+  </section>
+</main>
+<script>
+  const byId = (id) => document.getElementById(id)
+  const form = byId('upload')
+  const run = byId('run')
+  const status = byId('status')
+  const error = byId('error')
+  const result = byId('result')
+  const download = byId('download')
+  const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
+  let reportURL
+
+  function clearResult() {
+    result.hidden = true
+    if (reportURL) URL.revokeObjectURL(reportURL)
+    reportURL = undefined
+    download.removeAttribute('href')
+  }
+
+  form.addEventListener('change', () => {
+    clearResult()
+    error.textContent = ''
+  })
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    clearResult()
+    error.textContent = ''
+    status.textContent = 'Reading your files and matching transactions…'
+    const files = new FormData(form)
+    const inputs = Array.from(form.querySelectorAll('input'))
+    run.disabled = true
+    inputs.forEach((input) => { input.disabled = true })
+    try {
+      const bytes = Array.from(files.values()).reduce((sum, file) => sum + file.size, 0)
+      if (bytes > 3_990_000) throw new Error('Select files with a combined size under 4 MB.')
+      const response = await fetch('/reconcile', {
+        method: 'POST',
+        headers: { 'X-Matching-Statement': '1' },
+        body: files
+      })
+      if (!response.ok) {
+        const details = await response.json().catch(() => ({}))
+        throw new Error(details.error || 'Reconciliation could not be completed. Try again.')
+      }
+      const summary = JSON.parse(response.headers.get('X-Matching-Summary'))
+      reportURL = URL.createObjectURL(await response.blob())
+      download.href = reportURL
+      const period = summary.title.split(' — ').at(-1).replace(/[^a-z0-9]+/gi, '_')
+      download.download = 'Matching_Statement_Presidio_Flats_' + period + '.xlsx'
+      byId('report-title').textContent = summary.title
+      for (const key of ['bank', 'adjusted', 'difference']) byId(key).textContent = money.format(summary[key])
+      byId('exceptions').textContent = summary.exceptions
+      byId('review-note').textContent = summary.paylease
+        ? 'Confirm ' + summary.paylease + ' provisional PayLease groups against processor settlement detail. See Review Candidates in Excel.'
+        : 'See the workbook for unmatched transactions and supporting detail.'
+      result.hidden = false
+      byId('report-title').focus()
+    } catch (failure) {
+      error.textContent = failure instanceof TypeError
+        ? 'The app could not be reached. Refresh the page and try again.'
+        : failure.message
+    } finally {
+      status.textContent = ''
+      run.disabled = false
+      inputs.forEach((input) => { input.disabled = false })
+    }
+  })
+</script>
+</body>
+</html>
