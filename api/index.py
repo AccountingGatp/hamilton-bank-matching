@@ -13,7 +13,7 @@ from zipfile import BadZipFile
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
-from matching_statement import run
+from matching_statement import report_filename, run
 
 
 FIELDS = {
@@ -73,6 +73,9 @@ def output_summary(path):
         controls = {row[0]: row[1] for row in workbook['Controls and Sources'].values}
         return {
             'title': rows[0][0],
+            'period': f'{controls["Statement Start"]} to {controls["Statement End"]}',
+            'filename': report_filename(controls['Property'], controls['Account Last Four'],
+                                        controls['Statement Start'], controls['Statement End']),
             'bank': balances['Balance as per Bank Statement'],
             'adjusted': balances['Adjusted Balance'],
             'difference': balances['Difference if any (Adjusted − Bank)'],
@@ -134,6 +137,6 @@ class handler(BaseHTTPRequestHandler):
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             report,
             {'X-Matching-Summary': json.dumps(summary, ensure_ascii=True),
-             'Content-Disposition': 'attachment; filename=Matching_Statement.xlsx'},
+             'Content-Disposition': 'attachment; filename=' + summary['filename']},
         )
 

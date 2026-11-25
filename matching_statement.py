@@ -1,5 +1,6 @@
-"""Create a Presidio Flats Matching Statement workbook from Chase and ResMan exports."""
+"""Create a Matching Statement workbook from Chase and ResMan exports."""
 import argparse
+from calendar import monthrange
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -18,7 +19,9 @@ from pdf_layout import pdf_text
 MONEY = r'\$?-?[\d,]+\.\d{2}'
 DAY = r'\d{2}/\d{2}'
 FULL_DAY = r'\d{1,2}/\d{1,2}/\d{4}'
-MONTH = r'[A-Za-z]+ \d{2}, \d{4}'
+LONG_DAY = r'[A-Za-z]+ \d{1,2}, \d{4}'
+MONTH = r'[A-Za-z]+ \d{4}'
+PERIOD_DATE = rf'(?:{LONG_DAY}|{FULL_DAY}|\d{{4}}-\d{{2}}-\d{{2}}|{MONTH})'
 SECTIONS = {
     'deposits and additions': ('Deposits and Additions', 1),
     'atm debit withdrawal': ('ATM & Debit Card Withdrawals', -1),
@@ -51,9 +54,48 @@ def full_day(value):
     return datetime.strptime(value, '%m/%d/%Y').date()
 
 
-def short_day(value, end):
-    day = full_day(f'{value}/{end.year}')
-    return day.replace(year=end.year - 1) if day > end else day
+def short_day(value, start, end, *, optional=False):
+    candidates = []
+    for year in range(start.year, end.year + 1):
+        try:
+            day = full_day(f'{value}/{year}')
+        except ValueError:
+            continue
+        if start <= day <= end:
+            candidates.append(day)
+    if len(candidates) == 1:
+        return candidates[0]
+    if optional:
+        return None
+    raise ValueError(f'Chase posting date {value} is missing or ambiguous in the statement period.')
+
+
+def register_period(label):
+    label = re.sub(r'^\s*(?:date range|period|from)\s*:?\s*', '', label.strip(), flags=re.I)
+    period = re.fullmatch(
+        rf'({PERIOD_DATE})(?:\s*(?:through|to|[-–—])\s*({PERIOD_DATE}))?',
+        label, re.I,
+    )
+    if not period:
+        return None
+
+    def boundary(value, is_end):
+        for fmt in ('%m/%d/%Y', '%Y-%m-%d', '%B %d, %Y', '%b %d, %Y'):
+            try:
+                return datetime.strptime(value, fmt).date()
+            except ValueError:
+                continue
+        for fmt in ('%B %Y', '%b %Y'):
+            try:
+                day = datetime.strptime(value, fmt).date()
+            except ValueError:
+                continue
+            return day.replace(day=monthrange(day.year, day.month)[1]) if is_end else day
+        return None
+
+    start = boundary(period[1], False)
+    end = boundary(period[2] or period[1], True)
+    return (start, end) if start and end and start <= end else None
 
 
 def required(text, pattern, label):
@@ -65,8 +107,10 @@ def required(text, pattern, label):
 
 def read_chase(path):
     text = pdf_text(path)
-    dates = required(text, rf'({MONTH}) through ({MONTH})', 'Chase statement dates')
+    dates = required(text, rf'({LONG_DAY})\s+through\s+({LONG_DAY})', 'Chase statement dates')
     start, end = (datetime.strptime(value, '%B %d, %Y').date() for value in dates.groups())
+    if start > end:
+        raise ValueError('Chase statement start date follows its end date.')
     account = required(text, r'Account Number:\s*(\d+)', 'Chase account number')[1][-4:]
     opening = cents(required(text, rf'Beginning Balance\s+({MONEY})', 'bank opening balance')[1])
     close = required(text, rf'Ending Balance\s+(\d+)\s+({MONEY})', 'bank ending balance and count')
@@ -85,10 +129,11 @@ def read_chase(path):
         description = ' '.join(parts)
         reference = re.search(r'(?:Online (?:ACH )?Payment |Transaction#:\s*|Trn:\s*|Trace#:\s*)([A-Za-z0-9]+)', description)
         alt = re.search(rf'(?<!\d)({DAY})(?![\d/])', description)
+        posting_day = short_day(day, start, end)
         activity.append(Transaction(
-            key, short_day(day, end), amount * SECTIONS[section][1], description,
+            key, posting_day, amount * SECTIONS[section][1], description,
             number or (reference[1] if reference else ''), SECTIONS[section][0],
-            short_day(alt[1], end) if alt else None,
+            short_day(alt[1], posting_day - timedelta(days=31), posting_day, optional=True) if alt else None,
         ))
         pending = None
 
@@ -157,13 +202,25 @@ def excel_rows(path):
 
 def read_register(path):
     rows = excel_rows(path)
-    account = required(' '.join(str(value) for row in rows[:12] for value in row if value),
-                       r'X{3,}(\d{4})\b', 'ResMan account number')[1]
-    period = required(str(rows[3][0]), r'([A-Za-z]+ \d{4})', 'ResMan register month')[1]
-    month = datetime.strptime(period, '%B %Y').date()
-    header = next(row for row in rows if row and row[0] == 'Date')
+    header_index = next(i for i, row in enumerate(rows) if row and row[0] == 'Date')
+    header = rows[header_index]
+    account_index = next(
+        i for i, row in enumerate(rows[:header_index]) if 'Account Number' in row and 'Account Name' in row
+    )
+    account_header = rows[account_index]
+    account_values = rows[account_index + 1]
+    masked = str(account_values[account_header.index('Account Number')] or '')
+    account = required(masked, r'(\d{4})\s*$', 'ResMan account number')[1]
+    account_name = str(account_values[account_header.index('Account Name')] or f'Account {account}').strip()
+    period = next(
+        (parsed for row in rows[3:account_index] if row and isinstance(row[0], str)
+         if (parsed := register_period(row[0])) is not None),
+        None,
+    )
+    if period is None:
+        raise ValueError('The ResMan register must show a reporting month or a start and end date in its header.')
     columns = {value: header.index(value) for value in (
-        'Date', 'Type', 'Reference', 'Void', 'Description/Payee', 'Debit (+)', 'Credit (-)', 'Balance',
+        'Date', 'Type', 'Reference', 'Description/Payee', 'Debit (+)', 'Credit (-)', 'Balance',
     )}
     activity = []
     balances = {}
@@ -188,15 +245,17 @@ def read_register(path):
     net = sum(item.cents for item in activity)
     if balances['Net Change'] != net or balances['Beginning Balance'] + net != balances['Ending Balance']:
         raise ValueError('ResMan rows do not tie to the reported net change and balances.')
-    return str(rows[0][0]), account, month, balances['Beginning Balance'], balances['Ending Balance'], activity
+    if any(not period[0] <= item.day <= period[1] for item in activity):
+        raise ValueError('Register entries fall outside the reporting dates shown in the ResMan export.')
+    return str(rows[0][0]), account, account_name, period, balances['Beginning Balance'], activity
 
 
 def read_prior(path, start):
     text = pdf_text(path)
     account = required(text, r'X{3,}(\d{4})\b', 'prior ResMan account number')[1]
     closing_day = full_day(required(text, rf'Statement Date\s+({FULL_DAY})', 'prior statement date')[1])
-    if not 1 <= (start - closing_day).days <= 7:
-        raise ValueError('Prior reconciliation must end within seven days before the current Chase cycle starts.')
+    if closing_day >= start:
+        raise ValueError('Prior reconciliation must end before the current Chase statement starts.')
     bank = cents(required(text, rf'Statement Ending Balance\s+({MONEY})', 'prior bank balance')[1])
     books = cents(required(text, rf'Register Balance \(as of {FULL_DAY}\)\s+({MONEY})', 'prior register balance')[1])
     outstanding, cleared = [], []
@@ -232,15 +291,13 @@ def normalize(value):
     return re.sub(r'[^a-z0-9]', '', value.lower())
 
 
-def read_aging(path, property_name, month):
+def read_aging(path, property_name):
     rows = excel_rows(path)
     if normalize(str(rows[0][0])) != normalize(property_name):
         raise ValueError('AP Aging is for a different property.')
     header = next(row for row in rows if row and row[0] == 'Invoice Number')
     date_label = required(str(rows[3][0]), rf'Accounting Date\s+({FULL_DAY})', 'AP aging date')[1]
     aging_day = full_day(date_label)
-    if aging_day.replace(day=1) != month:
-        raise ValueError('AP Aging is for a different month.')
     vendor = ''
     invoices = []
     for number, row in enumerate(rows, 1):
@@ -377,7 +434,7 @@ def accept_groups(proposed, pair, rule, evidence):
             pair(bank_item, group, rule, evidence)
 
 
-def write_report(path, property_name, account, start, end, bank_open, bank_close, book_open, book_close,
+def write_report(path, property_name, account, account_name, start, end, bank_open, bank_close, book_open, book_close,
                  groups, matched, review, aging, source_files, counts, window, prior):
     titles = [
         'Add: Payments in books pending debit in bank',
@@ -407,6 +464,8 @@ def write_report(path, property_name, account, start, end, bank_open, bank_close
                     potential_dupes[item.key].extend(other.key for other in same if other != item)
 
     aging_date, invoices = aging
+    if aging_date < end:
+        invoices = []
     ap_suggestions = {}
     for item in groups[0] + groups[1]:
         ap_suggestions[item.key] = [
@@ -419,8 +478,6 @@ def write_report(path, property_name, account, start, end, bank_open, bank_close
             note = 'Still outstanding from the prior reconciliation. Verify clearance or supporting documentation.'
         elif index in (1, 2):
             note = 'No match in the supplied register. Verify supporting detail.'
-        elif item.day > end:
-            note = 'Register date follows the Chase statement end. Check next cycle.'
         else:
             note = 'No match in the supplied statement. Check posting or next statement.'
         if counterpart[item.key]:
@@ -453,14 +510,15 @@ def write_report(path, property_name, account, start, end, bank_open, bank_close
                     **(money if col == 4 else {}),
                 })
 
-        sheet = workbook.add_worksheet(f'{property_name[:14]} Operating {account}'[:31])
+        tab_prefix = re.sub(r"[\[\]:*?/\\']", ' ', property_name).strip()[:26].rstrip()
+        sheet = workbook.add_worksheet(f'{tab_prefix or "Account"} {account}')
         sheet.hide_gridlines(2)
         sheet.freeze_panes(3, 0)
         for column, width in enumerate((65, 13, 24, 16, 18, 14, 55)):
             sheet.set_column(column, column, width)
-        sheet.merge_range('A1:G1', f'{property_name} — Operating — Bank Reconciliation — {end:%B %Y}', title)
+        sheet.merge_range('A1:G1', f'{property_name} — Bank Reconciliation', title)
         sheet.set_row(0, 22)
-        sheet.merge_range('A2:G2', f'JPMorgan Chase …{account} vs ResMan Register through {end:%m/%d/%Y}', subtitle)
+        sheet.merge_range('A2:G2', f'{account_name} | Chase …{account} | {start:%m/%d/%Y} to {end:%m/%d/%Y}', subtitle)
         sheet.set_row(1, 18)
         row = 3
 
@@ -526,8 +584,8 @@ def write_report(path, property_name, account, start, end, bank_open, bank_close
 
         section('CLOSING DIFFERENCE BREAKDOWN')
         summary('Opening Difference (carried forward)', bank_open - book_open, f'={opening_difference}')
-        summary('(+) Current Month Bank Net', bank_close - bank_open)
-        summary('(−) Current Month Books Net', book_close - book_open)
+        summary('(+) Current Period Bank Net', bank_close - bank_open)
+        summary('(−) Current Period Books Net', book_close - book_open)
         summary('Closing Difference (Bank − Books)', bank_close - book_close, balance_formula, 'total')
         sheet.set_landscape()
         sheet.fit_to_pages(1, 0)
@@ -574,12 +632,19 @@ def write_report(path, property_name, account, start, end, bank_open, bank_close
             ['Control', 'Result', 'Detail'],
             [43, 31, 101],
             [
+                ('Property', property_name, account_name),
+                ('Account Last Four', account, 'Validated across Chase and both ResMan account reports.'),
+                ('Statement Start', start.isoformat(), ''),
+                ('Statement End', end.isoformat(), ''),
                 ('Chase PDF', source_files[0].name, f'{start:%m/%d/%Y} through {end:%m/%d/%Y}'),
-                ('ResMan register', source_files[1].name, 'Reported monthly register closing balance used.'),
+                ('ResMan register', source_files[1].name, f'Register activity after {end:%m/%d/%Y} is excluded from this statement.'),
                 ('Prior reconciliation', source_files[2].name, 'Prior bank and register endings tie to both current opening balances.'),
-                ('AP Aging Detail', source_files[3].name, f'As of {aging_date:%m/%d/%Y}. Open invoice evidence only.'),
+                ('AP Aging Detail', source_files[3].name, f'As of {aging_date:%m/%d/%Y}. ' + (
+                    'Snapshot predates the cutoff and was excluded from invoice suggestions.'
+                    if aging_date < end else 'Open invoice evidence only.')),
                 ('Bank transaction count', counts[0], 'Extracted count and signed totals checked against the Chase summary.'),
-                ('Register transaction count', counts[1], 'Extracted signed activity checked against the ResMan report totals.'),
+                ('Register export transaction count', counts[1], 'Extracted signed activity checked against the ResMan report totals.'),
+                ('Register rows in reconciliation', counts[2], 'After prior cutoff through the Chase ending date.'),
                 ('AP invoice rows', len(invoices), 'Candidate support requires equal open balance and overlapping payee text.'),
                 ('AP candidate hits', sum(map(len, ap_suggestions.values())), 'Any hits appear in the matching statement comments.'),
                 ('Prior outstanding rows', len(prior_outstanding), f'Signed: {sum(x.cents for x in prior_outstanding) / 100:,.2f}'),
@@ -593,35 +658,36 @@ def write_report(path, property_name, account, start, end, bank_open, bank_close
     return subtotal
 
 
+def report_filename(property_name, account, start, end):
+    property_slug = re.sub(r'[^A-Za-z0-9]+', '_', property_name).strip('_')[:80] or 'Property'
+    return f'Matching_Statement_{property_slug}_{account}_{start}_to_{end}.xlsx'
+
+
 def run(statement, register, prior_path, aging_path, output, window=5):
     bank_account, start, end, bank_open, bank_close, bank = read_chase(statement)
-    property_name, book_account, month, book_open, book_close, books = read_register(register)
+    property_name, book_account, account_name, (register_start, register_end), register_open, books = read_register(register)
     prior_account, prior_bank, prior_book, prior_day, outstanding, prior_cleared = read_prior(prior_path, start)
     if not bank_account == book_account == prior_account:
         raise ValueError('Chase, ResMan, and prior reconciliation account numbers must agree.')
+    if register_start > prior_day + timedelta(days=1) or register_end < end:
+        raise ValueError(f'Export the ResMan register for at least {prior_day + timedelta(days=1):%m/%d/%Y} '
+                         f'through {end:%m/%d/%Y} to cover the reconciliation period.')
+    book_open = register_open + sum(book.cents for book in books if book.day <= prior_day)
     if (bank_open, book_open) != (prior_bank, prior_book):
         raise ValueError('Current opening balances differ from the prior reconciliation.')
-    if month != end.replace(day=1) or any(book.day.replace(day=1) != month for book in books):
-        raise ValueError('ResMan register dates must be in the Chase statement ending month.')
-    if any(book.day < start for book in books):
-        raise ValueError('The register includes days covered by the previous statement. Review the date range.')
-    aging = read_aging(aging_path, property_name, month)
-    # Keep post-statement register activity visible as timing differences.
-    in_cycle = [book for book in books if book.day <= end]
+    in_cycle = [book for book in books if prior_day < book.day <= end]
+    book_close = book_open + sum(book.cents for book in in_cycle)
+    aging = read_aging(aging_path, property_name)
     groups, matched, review = reconcile(bank, in_cycle, outstanding, prior_cleared, window)
-    for book in books:
-        if book.day > end:
-            groups[0 if book.cents < 0 else 3].append(book)
     source_files = statement, register, prior_path, aging_path
     if output is None:
-        property_slug = re.sub(r'[^A-Za-z0-9]+', '_', property_name).strip('_')
-        output = Path.cwd() / f'Achieve_Properties_Matching_Statement_{property_slug}_{end:%B%Y}.xlsx'
+        output = Path.cwd() / report_filename(property_name, bank_account, start, end)
     if output.suffix.lower() != '.xlsx' or output.resolve() in {path.resolve() for path in source_files}:
         raise ValueError('Choose a new .xlsx output path distinct from the inputs.')
     if output.exists():
         raise ValueError(f'Output already exists: {output}. Choose a new output path.')
-    write_report(output, property_name, bank_account, start, end, bank_open, bank_close, book_open,
-                 book_close, groups, matched, review, aging, source_files, (len(bank), len(books)),
+    write_report(output, property_name, bank_account, account_name, start, end, bank_open, bank_close, book_open,
+                 book_close, groups, matched, review, aging, source_files, (len(bank), len(books), len(in_cycle)),
                  window, (prior_day, outstanding, prior_cleared))
     return output
 

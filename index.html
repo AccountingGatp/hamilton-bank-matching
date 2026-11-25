@@ -57,7 +57,7 @@
 <header><span>GATP Solutions</span></header>
 <main>
   <h1>Matching Statement</h1>
-  <p>Reconcile a Chase statement against the Presidio Flats ResMan register.</p>
+  <p>Reconcile a Chase statement against a ResMan bank register for the period shown on the statement.</p>
   <form id="upload" class="panel">
     <div class="files">
       <div class="file">
@@ -67,17 +67,17 @@
       </div>
       <div class="file">
         <label for="register">ResMan bank register</label>
-        <span class="hint" id="register-hint">Current period · Excel</span>
+        <span class="hint" id="register-hint">Date range covering the statement · Excel</span>
         <input id="register" name="register" type="file" accept=".xlsx" required aria-describedby="register-hint">
       </div>
       <div class="file">
         <label for="prior">Prior ResMan reconciliation</label>
-        <span class="hint" id="prior-hint">Previous finalized period · PDF</span>
+        <span class="hint" id="prior-hint">Finalized reconciliation before the statement start · PDF</span>
         <input id="prior" name="prior" type="file" accept=".pdf,application/pdf" required aria-describedby="prior-hint">
       </div>
       <div class="file">
         <label for="aging">AP Aging Detail</label>
-        <span class="hint" id="aging-hint">Current period · Excel</span>
+        <span class="hint" id="aging-hint">Invoice snapshot at or after the statement cutoff · Excel</span>
         <input id="aging" name="aging" type="file" accept=".xlsx" required aria-describedby="aging-hint">
       </div>
     </div>
@@ -90,6 +90,7 @@
   </form>
   <section id="result" class="panel" hidden aria-labelledby="report-title">
     <h2 id="report-title" tabindex="-1"></h2>
+    <p id="report-period" class="hint"></p>
     <dl>
       <div><dt>Chase closing balance</dt><dd id="bank"></dd></div>
       <div><dt>Adjusted books balance</dt><dd id="adjusted"></dd></div>
@@ -147,9 +148,9 @@
       const summary = JSON.parse(response.headers.get('X-Matching-Summary'))
       reportURL = URL.createObjectURL(await response.blob())
       download.href = reportURL
-      const period = summary.title.split(' — ').at(-1).replace(/[^a-z0-9]+/gi, '_')
-      download.download = 'Matching_Statement_Presidio_Flats_' + period + '.xlsx'
+      download.download = summary.filename
       byId('report-title').textContent = summary.title
+      byId('report-period').textContent = summary.period
       for (const key of ['bank', 'adjusted', 'difference']) byId(key).textContent = money.format(summary[key])
       byId('exceptions').textContent = summary.exceptions
       byId('review-note').textContent = summary.paylease
