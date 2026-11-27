@@ -51,10 +51,35 @@
     .files { grid-template-columns: 1fr; }
     dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
+
+header { display: flex; align-items: center; gap: 12px; }
+
+button.sop-trigger { margin-inline-start: auto; white-space: nowrap; }
+button.sop-trigger, button.sop-close { border: 1px solid #729286; border-radius: 8px; background: #eef6f1; color: #174235; padding: 7px 12px; font-size: .86rem; }
+button.sop-trigger:hover:not(:disabled), button.sop-close:hover:not(:disabled) { background: #dbeee3; }
+#sop { box-sizing: border-box; width: min(600px, calc(100% - 32px)); max-height: calc(100% - 32px); padding: clamp(16px, 4vw, 26px); border: 1px solid #a5bcb1; border-radius: 14px; background: #fff; color: #17382d; box-shadow: 0 12px 40px #102b3840; }
+#sop::backdrop { background: #102b38a6; }
+.sop-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sop-heading h2 { margin: 0; }
+.sop-steps { margin: 15px 0 0; padding-inline-start: 22px; font-size: .92rem; line-height: 1.55; }
+.sop-steps li + li { margin-top: 10px; }
 </style>
 </head>
 <body>
-<header><span>GATP Solutions</span></header>
+<header><span>GATP Solutions</span><button id="open-sop" class="sop-trigger" type="button" aria-haspopup="dialog" aria-controls="sop">View SOP</button></header>
+<dialog id="sop" aria-labelledby="sop-title">
+  <div class="sop-heading">
+    <h2 id="sop-title">Bank matching SOP</h2>
+    <button id="close-sop" class="sop-close" type="button" autofocus>Close</button>
+  </div>
+  <ol class="sop-steps">
+    <li><strong>Prepare four files for one bank account.</strong> Gather the current Chase statement PDF, the ResMan bank register Excel export, the preceding finalized ResMan reconciliation PDF, and the AP Aging Detail Excel export.</li>
+    <li><strong>Check the date coverage.</strong> The register must cover the day after the prior reconciliation through the Chase statement end date. Use an AP Aging snapshot for the same property dated on or after the statement cutoff.</li>
+    <li><strong>Run the reconciliation.</strong> Select the four files in their labeled fields. Keep the combined size under 4 MB and select Run reconciliation.</li>
+    <li><strong>Review the difference and open items.</strong> Compare Chase closing balance with adjusted books balance. Check unmatched items and use the workbook’s Review Candidates tab to verify proposed PayLease groups and same-amount matches.</li>
+    <li><strong>Save the workbook.</strong> Select Download Excel workbook and retain it with the source reports and any unresolved items.</li>
+  </ol>
+</dialog>
 <main>
   <h1>Matching Statement</h1>
   <p>Reconcile a Chase statement against a ResMan bank register for the period shown on the statement.</p>
@@ -102,6 +127,8 @@
   </section>
 </main>
 <script>
+  document.getElementById('open-sop').addEventListener('click', () => document.getElementById('sop').showModal())
+  document.getElementById('close-sop').addEventListener('click', () => document.getElementById('sop').close())
   const byId = (id) => document.getElementById(id)
   const form = byId('upload')
   const run = byId('run')
